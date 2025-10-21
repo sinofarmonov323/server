@@ -1,5 +1,8 @@
 import os
+import sys
+import threading
 import subprocess
+import signal
 from flask import Flask, render_template, redirect, url_for
 from forms import UploadForm
 from models import db, File
@@ -12,41 +15,26 @@ app.secret_key = "supersecretkey!"
 app.config['SQLALCHEMY_DATABASE_URI'] = "sqlite:///file.db"
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
+running_processes = {}
+
 db.init_app(app)
 admin.init_app(app)
 
-running_processes = {}
+os.makedirs("uploads", exist_ok=True)
 
 with app.app_context():
     db.create_all()
 
-def run_all_scripts():
-    """Run all uploaded Python files"""
-    files = File.query.all()
-    for file in files:
-        filepath = os.path.join("uploads", file.file)
-        if os.path.exists(filepath):
-            # Check if already running
-            if filepath in running_processes and running_processes[filepath].poll() is None:
-                print(f"Already running: {file.file}")
-                continue
-            
-            try:
-                # Open log file to capture output
-                log_file = filepath.replace(".py", ".log")
-                with open(log_file, "w") as log:
-                    log.write("Working\n")
-                    log.flush()
-                
-                process = subprocess.Popen(
-                    ["python", filepath],
-                    stdout=open(log_file, "a"),
-                    stderr=open(log_file, "a")
-                )
-                running_processes[filepath] = process
-                print(f"Started: {file.file} (logs: {log_file})")
-            except Exception as e:
-                print(f"Error running {file.file}: {e}")
+def run_script(filepath):
+    """Run a Python file in background as its own process group (Linux-friendly)."""
+    process = subprocess.Popen(
+        ["python3", filepath],
+        preexec_fn=os.setsid,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    running_processes[os.path.basename(filepath)] = process
+    print(f"Started {filepath} (pid={process.pid})")
 
 @app.route("/")
 def homepage():
@@ -55,20 +43,32 @@ def homepage():
 @app.route("/file/<int:file_id>")
 def file_page(file_id):
     file = File.query.get(file_id)
-    with open("uploads/" + file.file, "r") as f:
-        file.content = f.read()
     return render_template("file.html", file=file)
 
 @app.route("/delete_file/<int:file_id>")
 def delete_file(file_id):
     file = File.query.get(file_id)
-    if file:
-        filepath = os.path.join("uploads", file.file)
-        if filepath in running_processes:
-            running_processes[filepath].terminate()
-            del running_processes[filepath]
-        db.session.delete(file)
-        db.session.commit()
+    if not file:
+        return redirect(url_for("homepage"))
+
+    filename = file.file
+    filepath = os.path.join("uploads", filename)
+
+    process = running_processes.pop(filename, None)
+    if process:
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            process.wait(timeout=3)
+            print(f"Killed process group for {filename}")
+        except Exception as e:
+            print(f"Error killing process for {filename}: {e}")
+
+    if os.path.exists(filepath):
+        os.remove(filepath)
+
+    db.session.delete(file)
+    db.session.commit()
+
     return redirect(url_for("homepage"))
 
 @app.route("/upload", methods=["GET", "POST"])
@@ -82,14 +82,12 @@ def upload_page():
         new_file = File(file=file.filename)
         db.session.add(new_file)
         db.session.commit()
-        
-        run_all_scripts()
+
+        run_script(filepath)
         
         return redirect(url_for("homepage"))
     return render_template("upload.html", form=form)
 
 
 if __name__=="__main__":
-    with app.app_context():
-        run_all_scripts()
-    app.run(debug=False)
+    app.run(debug=True)
