@@ -3,3 +3,4 @@ flask-admin
 flask-sqlalchemy
 wtforms
 flask-forms
+gunicorn
