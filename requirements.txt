@@ -10,3 +10,4 @@ jsonbot
 aiogram
 pytelegrambotapi
 gunicorn
+flask_wtf
